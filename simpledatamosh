@@ -1,0 +1,254 @@
+#!/usr/bin/env bash
+#
+# simpledatamosh - version simplificada del datamosh a partir de una imagen.
+#
+# La idea de fondo es la misma (datamosh real a nivel de bitstream):
+#   cada seccion se codifica con UN solo I-frame y despues se le quita ese
+#   I-frame; al unir los streams, los P-frames quedan apuntando a un frame
+#   que no existe y el decodificador arrastra la imagen anterior.
+#
+# La diferencia es la SIMPLIFICACION: en vez de combinar muchos efectos
+# (variantes + zoom pulsante + barrido + vaiven), se elige UN efecto visual
+# al azar y UN movimiento simple al azar. El corte se hace inline, sin
+# python3: el I-frame se quita con -bsf:v filter_units.
+#
+# Solo requiere ffmpeg y ffprobe.
+#
+set -euo pipefail
+export LC_ALL=C
+
+usage() {
+  cat <<'EOF'
+Uso:
+  simpledatamosh [opciones] IMAGEN
+
+Opciones:
+  -o, --output ARCHIVO   Archivo de salida (.mp4, .webm, .gif)  [default: mosh.gif]
+  -e, --effect NOMBRE    Efecto visual unico:
+                         hflip | vflip | rotate | negate | hue | shift | eq
+                                                          [random]
+  -m, --motion NOMBRE    Movimiento simple: zoom (zoom-in lento) | pan (barrido)
+                                                          [random]
+  -n, --sections N       Numero de cortes/secciones. 1 = un solo sangrado largo,
+                         6+ = glitch por rafagas           [random: 1-8]
+      --intro SEG        Intro antes del primer glitch (imagen original)
+                                                          [default: 0.1]
+  -d, --duration SEG     Duracion de cada seccion          [random: 1-2.5]
+  -i, --intensity N      Intensidad del glitch (1-10)      [random: 3-9]
+  -f, --fps N            FPS de salida                     [default: 30]
+  -s, --size WxH         Resolucion de salida              [default: auto]
+  -j, --jump N           Stutter: muestra 1 de cada N frames    [default: off]
+      --seed N           Reproduce el mismo video (misma secuencia aleatoria)
+  -h, --help             Muestra esta ayuda
+EOF
+}
+
+# --- defaults ---------------------------------------------------------------
+# los valores "vacios"/0 = random (se resuelven abajo)
+OUTPUT="mosh.gif"
+EFFECT=""
+MOTION=""
+SECTIONS=0
+INTRO=0.1
+DUR=""
+INTENSITY=0
+FPS=30
+SIZE="auto"
+JUMP=0
+SEED=""
+
+# --- argumentos --------------------------------------------------------------
+INPUT=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o|--output)  OUTPUT="$2";   shift 2 ;;
+    -e|--effect)  EFFECT="$2";   shift 2 ;;
+    -m|--motion)  MOTION="$2";   shift 2 ;;
+    -n|--sections) SECTIONS="$2"; shift 2 ;;
+    --intro)      INTRO="$2";    shift 2 ;;
+    -d|--duration) DUR="$2";     shift 2 ;;
+    -i|--intensity) INTENSITY="$2"; shift 2 ;;
+    -f|--fps)     FPS="$2";      shift 2 ;;
+    -s|--size)    SIZE="$2";     shift 2 ;;
+    -j|--jump)    JUMP="$2";     shift 2 ;;
+    --seed)       SEED="$2";     shift 2 ;;
+    -h|--help)    usage; exit 0 ;;
+    -*) echo "opcion desconocida: $1" >&2; usage; exit 1 ;;
+    *)  INPUT="$1"; shift ;;
+  esac
+done
+
+[ -n "$INPUT" ] || { usage; exit 1; }
+[ -f "$INPUT" ] || { echo "error: no existe el archivo '$INPUT'" >&2; exit 1; }
+command -v ffmpeg >/dev/null || { echo "error: ffmpeg no esta instalado" >&2; exit 1; }
+command -v ffprobe >/dev/null || { echo "error: ffprobe no esta instalado" >&2; exit 1; }
+
+# --- aleatoriedad por defecto ---------------------------------------------------
+# todo parametrizable, pero si no se pasa un valor se elige al azar.
+# con --seed se siembra el RNG de bash => el resultado es reproducible.
+if [ -n "$SEED" ]; then RANDOM=$SEED; fi
+rnd() {
+  local min="$1" max="$2"
+  R=$(( min + RANDOM % (max - min + 1) ))
+}
+
+EFFECTS=(hflip vflip rotate negate hue shift eq)
+[ -n "$EFFECT" ] || { rnd 0 6; EFFECT=${EFFECTS[R]}; }
+MOTIONS=(zoom pan)
+[ -n "$MOTION" ] || { rnd 0 1; MOTION=${MOTIONS[R]}; }
+[ "$SECTIONS" -gt 0 ] 2>/dev/null || { rnd 1 8; SECTIONS=$R; }
+[ -n "$DUR" ] || { rnd 10 25; DUR=$(awk -v v="$R" 'BEGIN{ printf "%.1f", v/10 }'); }
+[ "$INTENSITY" -gt 0 ] 2>/dev/null || { rnd 3 9; INTENSITY=$R; }
+rnd 0 3; SHIFT_DIR=$R
+
+case "$EFFECT" in hflip|vflip|rotate|negate|hue|shift|eq) ;; *) echo "error: efecto invalido '$EFFECT'" >&2; exit 1 ;; esac
+case "$MOTION" in zoom|pan) ;; *) echo "error: movimiento invalido '$MOTION' (usa zoom o pan)" >&2; exit 1 ;; esac
+INTENSITY=$(awk -v i="$INTENSITY" 'BEGIN{ if(i<1)i=1; if(i>10)i=10; printf "%d", i }')
+DUR=$(awk -v d="$DUR" 'BEGIN{ if(d<0.2)d=0.2; if(d>20)d=20; printf "%.2f", d }')
+SECTIONS=$(awk -v n="$SECTIONS" 'BEGIN{ if(n<1)n=1; if(n>12)n=12; printf "%d", n }')
+
+case "$OUTPUT" in
+  *.mp4) OUTFMT=mp4 ;;
+  *.webm) OUTFMT=webm ;;
+  *.gif)  OUTFMT=gif ;;
+  *)      echo "error: extension de salida no soportada (usa .mp4, .webm o .gif)" >&2; exit 1 ;;
+esac
+
+# --- temporales ---------------------------------------------------------------
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
+WORK="$TMP/work.png"
+
+# resolucion de trabajo: auto => ancho 1280 manteniendo aspecto
+orig_dim=$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 "$INPUT")
+orig_w=${orig_dim%%,*}
+orig_h=${orig_dim##*,}
+if [ "$SIZE" = "auto" ]; then
+  W=$(( orig_w > 1280 ? 1280 : orig_w ))
+  W=$(( W - (W % 2) ))
+  [ "$W" -gt 0 ] || W=640
+  H=$(( orig_h * W / orig_w ))
+  H=$(( H - (H % 2) ))
+else
+  W=${SIZE%x*}; H=${SIZE#*x}
+  W=$(( W - (W % 2) )); H=$(( H - (H % 2) ))
+fi
+[ "$W" -gt 0 ] && [ "$H" -gt 0 ] || { echo "error: tamano invalido '$SIZE'" >&2; exit 1; }
+
+N=$(awk -v d="$DUR" -v f="$FPS" 'BEGIN{ printf "%d", d * f + 0.5 }')   # frames por seccion
+INTRO_FRAMES=$(awk -v s="$INTRO" -v f="$FPS" 'BEGIN{ n=int(s*f+0.5); if(n<1)n=1; printf "%d", n }')
+CRF=$(awk -v i="$INTENSITY" 'BEGIN{ printf "%d", 14 + (i-1)*26/9 }')    # calidad: 14 (fino) .. 40 (sucio)
+SHIFT_STEP=$(( (W < H ? W : H) / 12 )); [ "$SHIFT_STEP" -gt 0 ] || SHIFT_STEP=1
+
+echo "==> imagen: $INPUT  efecto: $EFFECT  movimiento: $MOTION  ${SECTIONS} secciones x ${N} frames @ ${FPS}fps  crf=$CRF  dur=${DUR}s${SEED:+  seed=$SEED}"
+
+# --- imagen de trabajo (tamano fijo) -------------------------------------------
+ffmpeg -y -loglevel error -i "$INPUT" \
+  -vf "scale=${W}:${H}:force_original_aspect_ratio=decrease,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:color=black" \
+  "$WORK"
+
+# --- codificar con UN solo I-frame por archivo ----------------------------------
+ENC="-an -c:v libx264 -preset medium -crf ${CRF} -pix_fmt yuv420p -g 100000 -keyint_min 100000 -sc_threshold 0 -bf 0 -f h264"
+
+# intro: unos pocos frames estaticos de la imagen ORIGINAL (conserva su I-frame)
+intro_encode() {
+  ffmpeg -y -loglevel error -loop 1 -i "$1" \
+    -vf "fps=${FPS},scale=${W}:${H}" -frames:v "$INTRO_FRAMES" \
+    $ENC "$TMP/intro.h264"
+}
+
+# variante k de la imagen bajo UN SOLO efecto elegido. los efectos con
+# parametro rampan con k (así cada sección difiere y el corte sangra);
+# los binarios alternan con la paridad de k.
+variant() {
+  local k="$1" out="$2"
+  case "$EFFECT" in
+    hflip)
+      if [ $((k % 2)) -eq 1 ]; then ffmpeg -y -loglevel error -i "$WORK" -vf hflip "$out"
+      else cp "$WORK" "$out"; fi ;;
+    vflip)
+      if [ $((k % 2)) -eq 1 ]; then ffmpeg -y -loglevel error -i "$WORK" -vf vflip "$out"
+      else cp "$WORK" "$out"; fi ;;
+    rotate)
+      ANG=$(awk -v k="$k" 'BEGIN{ printf "%.6f", k*3.14159265358979/2 }')
+      ffmpeg -y -loglevel error -i "$WORK" -vf "rotate=${ANG}:fillcolor=black" "$out" ;;
+    negate)
+      if [ $((k % 2)) -eq 1 ]; then ffmpeg -y -loglevel error -i "$WORK" -vf negate "$out"
+      else cp "$WORK" "$out"; fi ;;
+    hue)
+      HUE=$(awk -v k="$k" 'BEGIN{ printf "%.0f", k*30 }')
+      ffmpeg -y -loglevel error -i "$WORK" -vf "hue=h=${HUE}" "$out" ;;
+    shift)
+      OFF=$(( k * SHIFT_STEP ))
+      case "$SHIFT_DIR" in
+        0) ffmpeg -y -loglevel error -i "$WORK" -vf "crop=${W}-${OFF}:${H}:0:0,pad=${W}:${H}:${OFF}:0:color=black" "$out" ;;
+        1) ffmpeg -y -loglevel error -i "$WORK" -vf "crop=${W}-${OFF}:${H}:${OFF}:0,pad=${W}:${H}:0:0:color=black" "$out" ;;
+        2) ffmpeg -y -loglevel error -i "$WORK" -vf "crop=${W}:${H}-${OFF}:0:0,pad=${W}:${H}:0:${OFF}:color=black" "$out" ;;
+        3) ffmpeg -y -loglevel error -i "$WORK" -vf "crop=${W}:${H}-${OFF}:0:${OFF},pad=${W}:${H}:0:0:color=black" "$out" ;;
+      esac ;;
+    eq)
+      B=$(awk -v k="$k" 'BEGIN{ printf "%.3f", 0.05*k }')
+      ffmpeg -y -loglevel error -i "$WORK" -vf "eq=brightness=${B}" "$out" ;;
+  esac
+}
+
+# movimiento simple (zoom-in lento o barrido), y de paso se le QUITA el
+# I-frame inline con filter_units (sin python3)
+motion() {
+  local img="$1" out="$2"
+  if [ "$MOTION" = "zoom" ]; then
+    ffmpeg -y -loglevel error -i "$img" \
+      -vf "zoompan=z='1+0.004*on':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${N}:fps=${FPS}:s=${W}x${H}" \
+      $ENC -bsf:v filter_units=remove_types=5 "$out"
+  else
+    ffmpeg -y -loglevel error -i "$img" \
+      -vf "zoompan=z='1.2':x='(iw-iw/zoom)*(on/${N})':y='(ih-ih/zoom)/2':d=${N}:fps=${FPS}:s=${W}x${H}" \
+      $ENC -bsf:v filter_units=remove_types=5 "$out"
+  fi
+}
+
+# --- construir el video ---------------------------------------------------------
+echo "==> codificando intro (original, ${INTRO_FRAMES} frames) + ${SECTIONS} secciones, 1 solo I-frame cada archivo (efecto: $EFFECT, movimiento: $MOTION)..."
+intro_encode "$WORK"
+
+SECTIONS_P=""
+k=1
+while [ "$k" -le "$SECTIONS" ]; do
+  variant "$k" "$TMP/v$k.png"
+  motion "$TMP/v$k.png" "$TMP/s$k.h264"
+  SECTIONS_P="$SECTIONS_P $TMP/s$k.h264"
+  k=$((k+1))
+done
+
+echo "==> uniendo bitstreams (sin los I-frames) a nivel de compresion..."
+cat "$TMP/intro.h264" $SECTIONS_P > "$TMP/mosh.h264"
+
+echo "==> muxando el video datamosheado..."
+MOSH="$TMP/mosh.mp4"
+ffmpeg -y -loglevel error -fflags +genpts -r "$FPS" -i "$TMP/mosh.h264" -an -c:v copy "$MOSH"
+
+# stutter opcional: re-codificar lo glitcheado descartando frames (el glitch ya
+# esta "quemado" en los pixeles, solo cambia el ritmo)
+if [ "$JUMP" -gt 1 ]; then
+  echo "==> stutter: mostrando 1 de cada $JUMP frames"
+  ffmpeg -y -loglevel error -i "$MOSH" -vf "select='not(mod(n,$JUMP))'" -vsync 0 \
+    -c:v libx264 -preset medium -crf "$CRF" -pix_fmt yuv420p "$TMP/stutter.mp4"
+  MOSH="$TMP/stutter.mp4"
+fi
+
+# --- salida --------------------------------------------------------------------
+case "$OUTFMT" in
+  mp4) cp "$MOSH" "$OUTPUT" ;;
+  webm)
+    ffmpeg -y -loglevel error -i "$MOSH" -an -c:v libvpx-vp9 -crf 32 -b:v 0 "$OUTPUT"
+    ;;
+  gif)
+    ffmpeg -y -loglevel error -i "$MOSH" -vf "fps=$FPS,palettegen=stats_mode=diff" "$TMP/pal.png"
+    ffmpeg -y -loglevel error -i "$MOSH" -i "$TMP/pal.png" \
+      -lavfi "fps=$FPS[x];[x][1:v]paletteuse=dither=sierra2_4a" "$OUTPUT"
+    ;;
+esac
+
+keys=$(ffprobe -v error -select_streams v -show_entries frame=pict_type -of csv=p=0 "$MOSH" 2>/dev/null | sort | uniq -c | tr '\n' ' ' || true)
+echo "==> listo: $OUTPUT"
+echo "==> tipos de frame (1 I = primer frame, el resto P): $keys"
