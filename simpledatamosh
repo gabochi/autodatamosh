@@ -27,8 +27,8 @@ Opciones:
   -e, --effect NOMBRE    Efecto visual unico:
                          hflip | vflip | rotate | negate | hue | shift | eq
                                                           [random]
-  -m, --motion NOMBRE    Movimiento simple: zoom (zoom-in lento) | pan (barrido)
-                                                          [random]
+  -m, --motion NOMBRE    Movimiento: zoom | zoomout | pulse | pan | panrev |
+                         panup | pandown | diag                  [random]
   -n, --sections N       Numero de cortes/secciones. 1 = un solo sangrado largo,
                          6+ = glitch por rafagas           [random: 1-8]
       --intro SEG        Intro antes del primer glitch (imagen original)
@@ -94,15 +94,15 @@ rnd() {
 
 EFFECTS=(hflip vflip rotate negate hue shift eq)
 [ -n "$EFFECT" ] || { rnd 0 6; EFFECT=${EFFECTS[R]}; }
-MOTIONS=(zoom pan)
-[ -n "$MOTION" ] || { rnd 0 1; MOTION=${MOTIONS[R]}; }
+MOTIONS=(zoom zoomout pulse pan panrev panup pandown diag)
+[ -n "$MOTION" ] || { rnd 0 7; MOTION=${MOTIONS[R]}; }
 [ "$SECTIONS" -gt 0 ] 2>/dev/null || { rnd 1 8; SECTIONS=$R; }
 [ -n "$DUR" ] || { rnd 10 25; DUR=$(awk -v v="$R" 'BEGIN{ printf "%.1f", v/10 }'); }
 [ "$INTENSITY" -gt 0 ] 2>/dev/null || { rnd 3 9; INTENSITY=$R; }
 rnd 0 3; SHIFT_DIR=$R
 
 case "$EFFECT" in hflip|vflip|rotate|negate|hue|shift|eq) ;; *) echo "error: efecto invalido '$EFFECT'" >&2; exit 1 ;; esac
-case "$MOTION" in zoom|pan) ;; *) echo "error: movimiento invalido '$MOTION' (usa zoom o pan)" >&2; exit 1 ;; esac
+case "$MOTION" in zoom|zoomout|pulse|pan|panrev|panup|pandown|diag) ;; *) echo "error: movimiento invalido '$MOTION' (usa zoom, zoomout, pulse, pan, panrev, panup, pandown o diag)" >&2; exit 1 ;; esac
 INTENSITY=$(awk -v i="$INTENSITY" 'BEGIN{ if(i<1)i=1; if(i>10)i=10; printf "%d", i }')
 DUR=$(awk -v d="$DUR" 'BEGIN{ if(d<0.2)d=0.2; if(d>20)d=20; printf "%.2f", d }')
 SECTIONS=$(awk -v n="$SECTIONS" 'BEGIN{ if(n<1)n=1; if(n>12)n=12; printf "%d", n }')
@@ -192,19 +192,23 @@ variant() {
   esac
 }
 
-# movimiento simple (zoom-in lento o barrido), y de paso se le QUITA el
-# I-frame inline con filter_units (sin python3)
+# movimiento simple, y de paso se le QUITA el I-frame inline con filter_units
+# (sin python3). el reset de zoom/paneo al inicio de cada seccion diferencia
+# las secciones aunque el efecto no cambie.
 motion() {
   local img="$1" out="$2"
-  if [ "$MOTION" = "zoom" ]; then
-    ffmpeg -y -loglevel error -i "$img" \
-      -vf "zoompan=z='1+0.004*on':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${N}:fps=${FPS}:s=${W}x${H}" \
-      $ENC -bsf:v filter_units=remove_types=5 "$out"
-  else
-    ffmpeg -y -loglevel error -i "$img" \
-      -vf "zoompan=z='1.2':x='(iw-iw/zoom)*(on/${N})':y='(ih-ih/zoom)/2':d=${N}:fps=${FPS}:s=${W}x${H}" \
-      $ENC -bsf:v filter_units=remove_types=5 "$out"
-  fi
+  case "$MOTION" in
+    zoom)    VF="zoompan=z='1+0.004*on':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${N}:fps=${FPS}:s=${W}x${H}" ;;
+    zoomout) VF="zoompan=z='min(1.3,1+0.004*(${N}-on))':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${N}:fps=${FPS}:s=${W}x${H}" ;;
+    pulse)   VF="zoompan=z='1.1+0.1*sin(2*PI*on/${N})':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${N}:fps=${FPS}:s=${W}x${H}" ;;
+    pan)     VF="zoompan=z='1.2':x='(iw-iw/zoom)*(on/${N})':y='(ih-ih/zoom)/2':d=${N}:fps=${FPS}:s=${W}x${H}" ;;
+    panrev)  VF="zoompan=z='1.2':x='(iw-iw/zoom)*(1-on/${N})':y='(ih-ih/zoom)/2':d=${N}:fps=${FPS}:s=${W}x${H}" ;;
+    panup)   VF="zoompan=z='1.2':x='(iw-iw/zoom)/2':y='(ih-ih/zoom)*(1-on/${N})':d=${N}:fps=${FPS}:s=${W}x${H}" ;;
+    pandown) VF="zoompan=z='1.2':x='(iw-iw/zoom)/2':y='(ih-ih/zoom)*(on/${N})':d=${N}:fps=${FPS}:s=${W}x${H}" ;;
+    diag)    VF="zoompan=z='1.2':x='(iw-iw/zoom)*(on/${N})':y='(ih-ih/zoom)*(on/${N})':d=${N}:fps=${FPS}:s=${W}x${H}" ;;
+  esac
+  ffmpeg -y -loglevel error -i "$img" \
+    -vf "$VF" $ENC -bsf:v filter_units=remove_types=5 "$out"
 }
 
 # --- construir el video ---------------------------------------------------------

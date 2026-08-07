@@ -40,7 +40,7 @@ Con **todos los parámetros opcionales**: si no se pasan, se eligen **al azar**.
 |---|---|---|
 | `-o, --output ARCHIVO` | Salida (`.mp4`, `.webm`, `.gif`) | `mosh.gif` |
 | `-e, --effect NOMBRE` | Efecto único: `hflip`, `vflip`, `rotate`, `negate`, `hue`, `shift`, `eq` | random |
-| `-m, --motion NOMBRE` | Movimiento simple: `zoom` (zoom-in lento) o `pan` (barrido) | random |
+| `-m, --motion NOMBRE` | Movimiento: `zoom`, `zoomout`, `pulse`, `pan`, `panrev`, `panup`, `pandown`, `diag` | random |
 | `-n, --sections N` | N° de cortes/secciones. `1` = un solo sangrado largo; `6+` = glitch por ráfagas | random 1–8 |
 | `--intro SEG` | Intro antes del primer glitch (imagen original) | `0.1` |
 | `-d, --duration SEG` | Duración de cada sección | random 1–2.5 |
@@ -79,6 +79,7 @@ Con **todos los parámetros opcionales**: si no se pasan, se eligen **al azar**.
 |---|---|---|
 | `-o, --output ARCHIVO` | Salida (`.mp4`, `.webm`, `.gif`) | `mosh.gif` |
 | `-m, --mode MODO` | `bleed` (voltea/rota y sangra) o `melt` (derrite/desliza) | random |
+| `--motion NOMBRE` | Movimiento dentro de cada sección: `combo` (pulso + barrido + vaivén), `zoom`, `zoomout`, `pulse`, `pan`, `panrev`, `panup`, `pandown`, `diag` | `combo` |
 | `-a, --start N` | Variante inicial de la intro (0–8): `0`=original, `1`=hflip, `2`=vflip, `3`=180°, `4`=hflip+vflip, `5`=90°cw, `6`=90°ccw, `7`=45°, `8`=-45° | random |
 | `--rotate on\|off` | `off` = mostrar la imagen original derecha en todas las secciones (sin rotar/voltear) | `on` |
 | `-n, --sections N` | N° de cortes/secciones que se van sangrando. `1` = un solo sangrado largo; `6+` = glitch por ráfagas | random 1–8 |

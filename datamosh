@@ -37,8 +37,12 @@ Uso:
 Opciones:
   -o, --output ARCHIVO   Archivo de salida (.mp4, .webm, .gif)  [default: mosh.gif]
   -m, --mode MODO        melt | bleed                  [random: se elige al azar]
-                           melt  = la imagen se derrite/desliza entre secciones
-                           bleed = la imagen se voltea/rota y sangra en cada corte
+                            melt  = la imagen se derrite/desliza entre secciones
+                            bleed = la imagen se voltea/rota y sangra en cada corte
+      --motion NOMBRE    Movimiento dentro de cada seccion:
+                         combo (pulso + barrido + vaiven) | zoom | zoomout |
+                         pulse | pan | panrev | panup | pandown | diag
+                                                          [default: combo]
   -a, --start N          Variante inicial de la intro (0-8):
                          0=original (sin rotar) 1=hflip 2=vflip 3=180°
                          4=hflip+vflip 5=90cw 6=90ccw 7=45° 8=-45°
@@ -70,6 +74,7 @@ EOF
 # los valores "vacios"/0 = random (se resuelven abajo)
 OUTPUT="mosh.gif"
 MODE=""
+MOTION="combo"
 START=""
 SECTIONS=0
 INTRO=0.1
@@ -88,6 +93,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     -o|--output)  OUTPUT="$2"; shift 2 ;;
     -m|--mode)    MODE="$2";   shift 2 ;;
+    --motion)     MOTION="$2"; shift 2 ;;
     -a|--start)   START="$2";  shift 2 ;;
     -n|--sections) SECTIONS="$2"; shift 2 ;;
     --intro)      INTRO="$2";  shift 2 ;;
@@ -129,6 +135,7 @@ MODES=(bleed melt)
 [ "$INTENSITY" -gt 0 ] 2>/dev/null || { rnd 3 9; INTENSITY=$R; }
 
 case "$MODE" in melt|bleed) ;; *) echo "error: modo invalido '$MODE' (usa melt o bleed)" >&2; exit 1 ;; esac
+case "$MOTION" in combo|zoom|zoomout|pulse|pan|panrev|panup|pandown|diag) ;; *) echo "error: movimiento invalido '$MOTION' (usa combo, zoom, zoomout, pulse, pan, panrev, panup, pandown o diag)" >&2; exit 1 ;; esac
 case "$ROTATE" in on|off) ;; *) echo "error: rotate invalido '$ROTATE' (usa on u off)" >&2; exit 1 ;; esac
 INTENSITY=$(awk -v i="$INTENSITY" 'BEGIN{ if(i<1)i=1; if(i>10)i=10; printf "%d", i }')
 ZOOM=$(awk -v z="$ZOOM" 'BEGIN{ if(z<0)z=0; if(z>0.4)z=0.4; printf "%.4f", z }')
@@ -173,7 +180,7 @@ CRF=$(awk -v i="$INTENSITY" 'BEGIN{ printf "%d", 14 + (i-1)*26/9 }')    # calida
 
 INTROLABEL="v$START"
 if [ "$ROTATE" = "off" ] || [ "$START" -eq 0 ]; then INTROLABEL="orig"; fi
-echo "==> imagen: $INPUT  modo: $MODE  intro=$INTROLABEL  rotate=$ROTATE  ${SECTIONS} secciones x ${N} frames @ ${FPS}fps  crf=$CRF  dur=${DUR}s  zoom=$ZOOM${SEED:+  seed=$SEED}"
+echo "==> imagen: $INPUT  modo: $MODE  intro=$INTROLABEL  rotate=$ROTATE  motion=$MOTION  ${SECTIONS} secciones x ${N} frames @ ${FPS}fps  crf=$CRF  dur=${DUR}s  zoom=$ZOOM${SEED:+  seed=$SEED}"
 
 # --- imagen de trabajo (tamano fijo) -------------------------------------------
 ffmpeg -y -loglevel error -i "$INPUT" \
@@ -184,12 +191,21 @@ ffmpeg -y -loglevel error -i "$INPUT" \
 ENC="-an -c:v libx264 -preset medium -crf ${CRF} -pix_fmt yuv420p -g 100000 -keyint_min 100000 -sc_threshold 0 -bf 0 -f h264"
 motion() {
   local img="$1" out="$2" phase="$3"
-  # zoom pulsante (in-out) + barrido lateral completo + vaiven vertical.
-  # cada seccion arranca en una fase distinta del ciclo para que las
-  # secciones difieran y el corte sangre aunque no se rote la imagen.
+  case "$MOTION" in
+    combo)
+      VF="zoompan=z='1.15+${ZOOM}*sin(2*PI*(on/${N}+${phase}))':x='(iw-iw/zoom)*(0.5+0.5*sin(2*PI*(on/${N}+${phase})))':y='(ih-ih/zoom)*(0.5+0.35*cos(2*PI*(on/${N}+${phase})))':d=${N}:fps=${FPS}:s=${W}x${H}"
+      ;;
+    zoom)    VF="zoompan=z='1+0.004*on':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${N}:fps=${FPS}:s=${W}x${H}" ;;
+    zoomout) VF="zoompan=z='min(1.3,1+0.004*(${N}-on))':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${N}:fps=${FPS}:s=${W}x${H}" ;;
+    pulse)   VF="zoompan=z='1.1+0.1*sin(2*PI*(on/${N}+${phase}))':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${N}:fps=${FPS}:s=${W}x${H}" ;;
+    pan)     VF="zoompan=z='1.2':x='(iw-iw/zoom)*(on/${N})':y='(ih-ih/zoom)/2':d=${N}:fps=${FPS}:s=${W}x${H}" ;;
+    panrev)  VF="zoompan=z='1.2':x='(iw-iw/zoom)*(1-on/${N})':y='(ih-ih/zoom)/2':d=${N}:fps=${FPS}:s=${W}x${H}" ;;
+    panup)   VF="zoompan=z='1.2':x='(iw-iw/zoom)/2':y='(ih-ih/zoom)*(1-on/${N})':d=${N}:fps=${FPS}:s=${W}x${H}" ;;
+    pandown) VF="zoompan=z='1.2':x='(iw-iw/zoom)/2':y='(ih-ih/zoom)*(on/${N})':d=${N}:fps=${FPS}:s=${W}x${H}" ;;
+    diag)    VF="zoompan=z='1.2':x='(iw-iw/zoom)*(on/${N})':y='(ih-ih/zoom)*(on/${N})':d=${N}:fps=${FPS}:s=${W}x${H}" ;;
+  esac
   ffmpeg -y -loglevel error -i "$img" \
-    -vf "zoompan=z='1.15+${ZOOM}*sin(2*PI*(on/${N}+${phase}))':x='(iw-iw/zoom)*(0.5+0.5*sin(2*PI*(on/${N}+${phase})))':y='(ih-ih/zoom)*(0.5+0.35*cos(2*PI*(on/${N}+${phase})))':d=${N}:fps=${FPS}:s=${W}x${H}" \
-    $ENC "$out"
+    -vf "$VF" $ENC "$out"
 }
 
 # intro: unos pocos frames estaticos de una VARIANTE (la imagen original derecha
