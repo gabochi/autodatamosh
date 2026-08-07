@@ -1,0 +1,11 @@
+# salidas generadas
+*.mp4
+*.webm
+*.gif
+!ejemplo.gif
+*.webp
+
+# imagenes fuente y ejemplos locales
+*.png
+ejemplos/
+meme*
